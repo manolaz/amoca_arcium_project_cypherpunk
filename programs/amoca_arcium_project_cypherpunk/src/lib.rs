@@ -1,8 +1,7 @@
 use anchor_lang::prelude::*;
 use arcium_anchor::prelude::*;
 
-const COMP_DEF_OFFSET_ENCRYPT_MEDICAL_RECORD: u32 = comp_def_offset("encrypt_medical_record");
-const COMP_DEF_OFFSET_DECRYPT_MEDICAL_RECORD: u32 = comp_def_offset("decrypt_medical_record");
+const COMP_DEF_OFFSET_ADD_TOGETHER: u32 = comp_def_offset("add_together");
 
 declare_id!("JBSqhd6sYtYnUdXTYKwLENdgHyWbACDKLRvSqigcpqUf");
 
@@ -212,6 +211,12 @@ pub mod amoca_arcium_project_cypherpunk {
         record_type: String,
         timestamp: i64,
     ) -> Result<()> {
+        // Ensure the authority matches the doctor's authority
+        require_keys_eq!(
+            ctx.accounts.authority.key(),
+            ctx.accounts.doctor.authority,
+            ErrorCode::UnauthorizedAccess
+        );
         // Ensure only verified doctors can create medical records
         require!(ctx.accounts.doctor.is_verified, ErrorCode::DoctorNotVerified);
         let medical_record = &mut ctx.accounts.medical_record;
@@ -258,31 +263,45 @@ pub mod amoca_arcium_project_cypherpunk {
             computation_offset,
             args,
             None,
-            vec![StoreEncryptedMedicalDataCallback::callback_ix(&[])],
+            vec![AddTogetherCallbackAccounts::callback_ix(&[])],
         )?;
 
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "encrypt_medical_record")]
-    pub fn store_encrypted_medical_data_callback(
-        ctx: Context<StoreEncryptedMedicalDataCallback>,
-        output: ComputationOutputs<EncryptMedicalRecordOutput>,
+    #[arcium_callback(encrypted_ix = "add_together")]
+    pub fn add_together_callback(
+        ctx: Context<AddTogetherCallbackAccounts>,
+        output: ComputationOutputs<AddTogetherOutput>,
     ) -> Result<()> {
         let o = match output {
-            ComputationOutputs::Success(EncryptMedicalRecordOutput { field_0 }) => field_0,
+            ComputationOutputs::Success(AddTogetherOutput { field_0 }) => field_0,
             _ => return Err(ErrorCode::AbortedComputation.into()),
         };
 
         let medical_record = &mut ctx.accounts.medical_record;
-        medical_record.encrypted_data = o.ciphertexts[0];
-        medical_record.encrypted_nonce = o.nonce.to_le_bytes();
         
-        emit!(MedicalRecordStoredEvent {
-            medical_record: medical_record.key(),
-            patient: medical_record.patient,
-            doctor: medical_record.doctor,
-        });
+        // Determine operation type: if encrypted_data is uninitialized (all zeros), we're storing
+        // Otherwise, we're retrieving existing data
+        let is_storing = medical_record.encrypted_data == [0u8; 32];
+        
+        if is_storing {
+            // Store operation: update the encrypted data
+            medical_record.encrypted_data = o.ciphertexts[0];
+            medical_record.encrypted_nonce = o.nonce.to_le_bytes();
+            
+            emit!(MedicalRecordStoredEvent {
+                medical_record: medical_record.key(),
+                patient: medical_record.patient,
+                doctor: medical_record.doctor,
+            });
+        } else {
+            // Retrieve operation: emit event with decrypted data (don't modify the record)
+            emit!(MedicalRecordRetrievedEvent {
+                medical_record: medical_record.key(),
+                decrypted_data: o.ciphertexts[0],
+            });
+        }
         
         Ok(())
     }
@@ -314,29 +333,13 @@ pub mod amoca_arcium_project_cypherpunk {
             computation_offset,
             args,
             None,
-            vec![RetrieveMedicalDataCallback::callback_ix(&[])],
+            vec![AddTogetherCallbackAccounts::callback_ix(&[])],
         )?;
 
         Ok(())
     }
 
-    #[arcium_callback(encrypted_ix = "decrypt_medical_record")]
-    pub fn retrieve_medical_data_callback(
-        ctx: Context<RetrieveMedicalDataCallback>,
-        output: ComputationOutputs<DecryptMedicalRecordOutput>,
-    ) -> Result<()> {
-        let o = match output {
-            ComputationOutputs::Success(DecryptMedicalRecordOutput { field_0 }) => field_0,
-            _ => return Err(ErrorCode::AbortedComputation.into()),
-        };
-
-        emit!(MedicalRecordRetrievedEvent {
-            medical_record: ctx.accounts.medical_record.key(),
-            decrypted_data: o.ciphertexts[0],
-        });
-        
-        Ok(())
-    }
+    // Single callback for the `add_together` confidential instruction
 }
 
 // ==================== Account Structs ====================
@@ -515,7 +518,7 @@ pub struct UpdateAppointment<'info> {
 pub struct CreateMedicalRecord<'info> {
     #[account(
         init,
-        payer = doctor_authority,
+        payer = authority,
         space = 8 + 32 + 32 + 8 + 50 + 8 + 32 + 16 + 1,
         seeds = [
             b"medical_record",
@@ -526,18 +529,17 @@ pub struct CreateMedicalRecord<'info> {
     )]
     pub medical_record: Account<'info, MedicalRecord>,
     pub patient: Account<'info, Patient>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
     #[account(
-        seeds = [b"doctor", doctor_authority.key().as_ref()],
-        bump = doctor.bump,
-        has_one = doctor_authority
+        seeds = [b"doctor", authority.key().as_ref()],
+        bump = doctor.bump
     )]
     pub doctor: Account<'info, Doctor>,
-    #[account(mut)]
-    pub doctor_authority: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
-#[queue_computation_accounts("encrypt_medical_record", payer)]
+#[queue_computation_accounts("add_together", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
 pub struct StoreEncryptedMedicalData<'info> {
@@ -585,7 +587,7 @@ pub struct StoreEncryptedMedicalData<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset))]
     /// CHECK: checked by arcium program
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ENCRYPT_MEDICAL_RECORD))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ADD_TOGETHER))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Account<'info, Cluster>,
@@ -597,20 +599,20 @@ pub struct StoreEncryptedMedicalData<'info> {
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("encrypt_medical_record")]
+#[callback_accounts("add_together")]
 #[derive(Accounts)]
-pub struct StoreEncryptedMedicalDataCallback<'info> {
+pub struct AddTogetherCallbackAccounts<'info> {
     #[account(mut)]
     pub medical_record: Account<'info, MedicalRecord>,
     pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ENCRYPT_MEDICAL_RECORD))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ADD_TOGETHER))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
     /// CHECK: checked by account constraint
     pub instructions_sysvar: AccountInfo<'info>,
 }
 
-#[queue_computation_accounts("decrypt_medical_record", payer)]
+#[queue_computation_accounts("add_together", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
 pub struct RetrieveMedicalData<'info> {
@@ -657,7 +659,7 @@ pub struct RetrieveMedicalData<'info> {
     #[account(mut, address = derive_comp_pda!(computation_offset))]
     /// CHECK: checked by arcium program
     pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_DECRYPT_MEDICAL_RECORD))]
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ADD_TOGETHER))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Account<'info, Cluster>,
@@ -669,19 +671,9 @@ pub struct RetrieveMedicalData<'info> {
     pub arcium_program: Program<'info, Arcium>,
 }
 
-#[callback_accounts("decrypt_medical_record")]
-#[derive(Accounts)]
-pub struct RetrieveMedicalDataCallback<'info> {
-    pub medical_record: Account<'info, MedicalRecord>,
-    pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_DECRYPT_MEDICAL_RECORD))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(address = ::anchor_lang::solana_program::sysvar::instructions::ID)]
-    /// CHECK: checked by account constraint
-    pub instructions_sysvar: AccountInfo<'info>,
-}
+// Removed duplicate callback_accounts for the same encrypted ix to avoid type redefinitions
 
-#[init_computation_definition_accounts("encrypt_medical_record", payer)]
+#[init_computation_definition_accounts("add_together", payer)]
 #[derive(Accounts)]
 pub struct InitEncryptMedicalRecordCompDef<'info> {
     #[account(mut)]
@@ -695,7 +687,7 @@ pub struct InitEncryptMedicalRecordCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[init_computation_definition_accounts("decrypt_medical_record", payer)]
+#[init_computation_definition_accounts("add_together", payer)]
 #[derive(Accounts)]
 pub struct InitDecryptMedicalRecordCompDef<'info> {
     #[account(mut)]
