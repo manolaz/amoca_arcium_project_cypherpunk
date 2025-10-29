@@ -1,6 +1,17 @@
+#![allow(unexpected_cfgs)]
+#![allow(deprecated)]
+
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
 use arcium_anchor::prelude::*;
+
+mod state;
+mod events;
+mod errors;
+mod instructions;
+
+use state::*;
+use errors::ErrorCode;
 
 // Alias required by arcium macros to reference the crate root
 pub use crate as __client_accounts_crate;
@@ -21,40 +32,14 @@ pub mod amoca_arcium_project_cypherpunk {
         date_of_birth: i64,
         contact_info: String,
     ) -> Result<()> {
-        let patient = &mut ctx.accounts.patient;
-        patient.authority = ctx.accounts.authority.key();
-        patient.name = name;
-        patient.date_of_birth = date_of_birth;
-        patient.contact_info = contact_info;
-        patient.created_at = Clock::get()?.unix_timestamp;
-        patient.bump = ctx.bumps.patient;
-        
-        emit!(PatientRegisteredEvent {
-            patient: patient.key(),
-            authority: patient.authority,
-            name: patient.name.clone(),
-        });
-        
-        Ok(())
+        instructions::register_patient(ctx, name, date_of_birth, contact_info)
     }
 
     pub fn update_patient(
         ctx: Context<UpdatePatient>,
         name: Option<String>,
         contact_info: Option<String>,
-    ) -> Result<()> {
-        let patient = &mut ctx.accounts.patient;
-        
-        if let Some(new_name) = name {
-            patient.name = new_name;
-        }
-        
-        if let Some(new_contact) = contact_info {
-            patient.contact_info = new_contact;
-        }
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::update_patient(ctx, name, contact_info) }
 
     // ==================== Doctor Instructions ====================
 
@@ -64,56 +49,15 @@ pub mod amoca_arcium_project_cypherpunk {
         specialization: String,
         license_number: String,
         consultation_fee: u64,
-    ) -> Result<()> {
-        let doctor = &mut ctx.accounts.doctor;
-        doctor.authority = ctx.accounts.authority.key();
-        doctor.name = name;
-        doctor.specialization = specialization;
-        doctor.license_number = license_number;
-        doctor.consultation_fee = consultation_fee;
-        doctor.is_verified = false; // Requires admin verification
-        doctor.total_consultations = 0;
-        doctor.created_at = Clock::get()?.unix_timestamp;
-        doctor.bump = ctx.bumps.doctor;
-        
-        emit!(DoctorRegisteredEvent {
-            doctor: doctor.key(),
-            authority: doctor.authority,
-            name: doctor.name.clone(),
-            specialization: doctor.specialization.clone(),
-        });
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::register_doctor(ctx, name, specialization, license_number, consultation_fee) }
 
-    pub fn verify_doctor(ctx: Context<VerifyDoctor>) -> Result<()> {
-        let doctor = &mut ctx.accounts.doctor;
-        doctor.is_verified = true;
-        
-        emit!(DoctorVerifiedEvent {
-            doctor: doctor.key(),
-        });
-        
-        Ok(())
-    }
+    pub fn verify_doctor(ctx: Context<VerifyDoctor>) -> Result<()> { instructions::verify_doctor(ctx) }
 
     pub fn update_doctor(
         ctx: Context<UpdateDoctor>,
         specialization: Option<String>,
         consultation_fee: Option<u64>,
-    ) -> Result<()> {
-        let doctor = &mut ctx.accounts.doctor;
-        
-        if let Some(new_spec) = specialization {
-            doctor.specialization = new_spec;
-        }
-        
-        if let Some(new_fee) = consultation_fee {
-            doctor.consultation_fee = new_fee;
-        }
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::update_doctor(ctx, specialization, consultation_fee) }
 
     // ==================== Appointment Instructions ====================
 
@@ -121,120 +65,28 @@ pub mod amoca_arcium_project_cypherpunk {
         ctx: Context<CreateAppointment>,
         appointment_time: i64,
         notes: String,
-    ) -> Result<()> {
-        // Ensure only verified doctors can accept appointments
-        require!(ctx.accounts.doctor.is_verified, ErrorCode::DoctorNotVerified);
-        let appointment = &mut ctx.accounts.appointment;
-        appointment.patient = ctx.accounts.patient.key();
-        appointment.doctor = ctx.accounts.doctor.key();
-        appointment.appointment_time = appointment_time;
-        appointment.notes = notes;
-        appointment.status = AppointmentStatus::Scheduled;
-        appointment.created_at = Clock::get()?.unix_timestamp;
-        appointment.bump = ctx.bumps.appointment;
-        
-        emit!(AppointmentCreatedEvent {
-            appointment: appointment.key(),
-            patient: appointment.patient,
-            doctor: appointment.doctor,
-            appointment_time,
-        });
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::create_appointment(ctx, appointment_time, notes) }
 
-    pub fn complete_appointment(ctx: Context<UpdateAppointment>) -> Result<()> {
-        let appointment = &mut ctx.accounts.appointment;
-        // Only the doctor who owns this appointment may complete it
-        require_keys_eq!(
-            ctx.accounts.authority.key(),
-            ctx.accounts.doctor.authority,
-            ErrorCode::UnauthorizedAccess
-        );
-        require!(
-            appointment.status == AppointmentStatus::Scheduled,
-            ErrorCode::InvalidAppointmentStatus
-        );
-        
-        appointment.status = AppointmentStatus::Completed;
-        
-        let doctor = &mut ctx.accounts.doctor;
-        doctor.total_consultations = doctor
-            .total_consultations
-            .checked_add(1)
-            .ok_or(ErrorCode::ArithmeticOverflow)?;
-        
-        emit!(AppointmentCompletedEvent {
-            appointment: appointment.key(),
-        });
-        
-        Ok(())
-    }
+    pub fn complete_appointment(ctx: Context<UpdateAppointment>) -> Result<()> { instructions::complete_appointment(ctx) }
 
-    pub fn cancel_appointment(ctx: Context<UpdateAppointment>) -> Result<()> {
-        let appointment = &mut ctx.accounts.appointment;
-        // Only the doctor who owns this appointment may cancel it (patient flow can be added)
-        require_keys_eq!(
-            ctx.accounts.authority.key(),
-            ctx.accounts.doctor.authority,
-            ErrorCode::UnauthorizedAccess
-        );
-        require!(
-            appointment.status == AppointmentStatus::Scheduled,
-            ErrorCode::InvalidAppointmentStatus
-        );
-        
-        appointment.status = AppointmentStatus::Cancelled;
-        
-        emit!(AppointmentCancelledEvent {
-            appointment: appointment.key(),
-        });
-        
-        Ok(())
-    }
+    pub fn cancel_appointment(ctx: Context<UpdateAppointment>) -> Result<()> { instructions::cancel_appointment(ctx) }
 
     // ==================== Medical Record Instructions (Encrypted) ====================
 
     pub fn init_encrypt_medical_record_comp_def(
         ctx: Context<InitEncryptMedicalRecordCompDef>,
-    ) -> Result<()> {
-        init_comp_def(ctx.accounts, true, 0, None, None)?;
-        Ok(())
-    }
+    ) -> Result<()> { init_comp_def(ctx.accounts, true, 0, None, None) }
 
     pub fn init_decrypt_medical_record_comp_def(
         ctx: Context<InitDecryptMedicalRecordCompDef>,
-    ) -> Result<()> {
-        init_comp_def(ctx.accounts, true, 0, None, None)?;
-        Ok(())
-    }
+    ) -> Result<()> { init_comp_def(ctx.accounts, true, 0, None, None) }
 
     pub fn create_medical_record(
         ctx: Context<CreateMedicalRecord>,
         record_id: u64,
         record_type: String,
         timestamp: i64,
-    ) -> Result<()> {
-        // Ensure the authority matches the doctor's authority
-        require_keys_eq!(
-            ctx.accounts.authority.key(),
-            ctx.accounts.doctor.authority,
-            ErrorCode::UnauthorizedAccess
-        );
-        // Ensure only verified doctors can create medical records
-        require!(ctx.accounts.doctor.is_verified, ErrorCode::DoctorNotVerified);
-        let medical_record = &mut ctx.accounts.medical_record;
-        medical_record.patient = ctx.accounts.patient.key();
-        medical_record.doctor = ctx.accounts.doctor.key();
-        medical_record.record_id = record_id;
-        medical_record.record_type = record_type;
-        medical_record.timestamp = timestamp;
-        medical_record.encrypted_data = [0u8; 32]; // Will be set by callback
-        medical_record.encrypted_nonce = [0u8; 16];
-        medical_record.bump = ctx.bumps.medical_record;
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::create_medical_record(ctx, record_id, record_type, timestamp) }
 
     pub fn store_encrypted_medical_data(
         ctx: Context<StoreEncryptedMedicalData>,
@@ -242,164 +94,24 @@ pub mod amoca_arcium_project_cypherpunk {
         data: Vec<u8>,
         pub_key: [u8; 32],
         nonce: u128,
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-        // Access control: only the patient or the doctor may write encrypted data
-        let payer_key = ctx.accounts.payer.key();
-        require!(
-            payer_key == ctx.accounts.patient.authority || payer_key == ctx.accounts.doctor.authority,
-            ErrorCode::UnauthorizedAccess
-        );
-        
-        // Convert data to fixed-size array (ciphertext)
-        let mut ciphertext = [0u8; 32];
-        let len = data.len().min(32);
-        ciphertext[..len].copy_from_slice(&data[..len]);
-        
-        let args = vec![
-            Argument::ArcisPubkey(pub_key),
-            Argument::PlaintextU128(nonce),
-            Argument::EncryptedU8(ciphertext),
-        ];
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            None,
-            vec![AddTogetherCallback::callback_ix(&[])],
-        )?;
-
-        Ok(())
-    }
+    ) -> Result<()> { instructions::store_encrypted_medical_data(ctx, computation_offset, data, pub_key, nonce) }
 
     #[arcium_callback(encrypted_ix = "add_together")]
     pub fn add_together_callback(
         ctx: Context<AddTogetherCallback>,
         output: ComputationOutputs<AddTogetherOutput>,
-    ) -> Result<()> {
-        let o = match output {
-            ComputationOutputs::Success(AddTogetherOutput { field_0 }) => field_0,
-            _ => return Err(ErrorCode::AbortedComputation.into()),
-        };
-
-        let medical_record = &mut ctx.accounts.medical_record;
-        
-        // Determine operation type: if encrypted_data is uninitialized (all zeros), we're storing
-        // Otherwise, we're retrieving existing data
-        let is_storing = medical_record.encrypted_data == [0u8; 32];
-        
-        if is_storing {
-            // Store operation: update the encrypted data
-            medical_record.encrypted_data = o.ciphertexts[0];
-            medical_record.encrypted_nonce = o.nonce.to_le_bytes();
-            
-            emit!(MedicalRecordStoredEvent {
-                medical_record: medical_record.key(),
-                patient: medical_record.patient,
-                doctor: medical_record.doctor,
-            });
-        } else {
-            // Retrieve operation: emit event with decrypted data (don't modify the record)
-            emit!(MedicalRecordRetrievedEvent {
-                medical_record: medical_record.key(),
-                decrypted_data: o.ciphertexts[0],
-            });
-        }
-        
-        Ok(())
-    }
+    ) -> Result<()> { instructions::add_together_callback(ctx, output) }
 
     pub fn retrieve_medical_data(
         ctx: Context<RetrieveMedicalData>,
         computation_offset: u64,
         pub_key: [u8; 32],
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-        // Access control: only the patient or the doctor may request decryption
-        let payer_key = ctx.accounts.payer.key();
-        require!(
-            payer_key == ctx.accounts.patient.authority || payer_key == ctx.accounts.doctor.authority,
-            ErrorCode::UnauthorizedAccess
-        );
-        
-        let medical_record = &ctx.accounts.medical_record;
-        let nonce_u128 = u128::from_le_bytes(medical_record.encrypted_nonce);
-        
-        let args = vec![
-            Argument::ArcisPubkey(pub_key),
-            Argument::PlaintextU128(nonce_u128),
-            Argument::EncryptedU8(medical_record.encrypted_data),
-        ];
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            None,
-            vec![AddTogetherCallback::callback_ix(&[])],
-        )?;
-
-        Ok(())
-    }
+    ) -> Result<()> { instructions::retrieve_medical_data(ctx, computation_offset, pub_key) }
 
     // Single callback for the `add_together` confidential instruction
 }
 
-// ==================== Account Structs ====================
-
-#[account]
-pub struct Patient {
-    pub authority: Pubkey,
-    pub name: String,
-    pub date_of_birth: i64,
-    pub contact_info: String,
-    pub created_at: i64,
-    pub bump: u8,
-}
-
-#[account]
-pub struct Doctor {
-    pub authority: Pubkey,
-    pub name: String,
-    pub specialization: String,
-    pub license_number: String,
-    pub consultation_fee: u64,
-    pub is_verified: bool,
-    pub total_consultations: u64,
-    pub created_at: i64,
-    pub bump: u8,
-}
-
-#[account]
-pub struct Appointment {
-    pub patient: Pubkey,
-    pub doctor: Pubkey,
-    pub appointment_time: i64,
-    pub notes: String,
-    pub status: AppointmentStatus,
-    pub created_at: i64,
-    pub bump: u8,
-}
-
-#[account]
-pub struct MedicalRecord {
-    pub patient: Pubkey,
-    pub doctor: Pubkey,
-    pub record_id: u64,
-    pub record_type: String,
-    pub timestamp: i64,
-    pub encrypted_data: [u8; 32],
-    pub encrypted_nonce: [u8; 16],
-    pub bump: u8,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum AppointmentStatus {
-    Scheduled,
-    Completed,
-    Cancelled,
-}
+// account state moved to state.rs
 
 // ==================== Context Structs ====================
 
@@ -412,7 +124,7 @@ pub struct RegisterPatient<'info> {
         seeds = [b"patient", authority.key().as_ref()],
         bump
     )]
-    pub patient: Account<'info, Patient>,
+    pub patient: Box<Account<'info, Patient>>,
     #[account(mut)]
     pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -426,7 +138,7 @@ pub struct UpdatePatient<'info> {
         bump = patient.bump,
         has_one = authority
     )]
-    pub patient: Account<'info, Patient>,
+    pub patient: Box<Account<'info, Patient>>,
     pub authority: Signer<'info>,
 }
 
@@ -439,7 +151,7 @@ pub struct RegisterDoctor<'info> {
         seeds = [b"doctor", authority.key().as_ref()],
         bump
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     #[account(mut)]
     pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -452,7 +164,7 @@ pub struct VerifyDoctor<'info> {
         seeds = [b"doctor", doctor.authority.as_ref()],
         bump = doctor.bump
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     pub admin: Signer<'info>, // Should be verified admin
 }
 
@@ -464,7 +176,7 @@ pub struct UpdateDoctor<'info> {
         bump = doctor.bump,
         has_one = authority
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     pub authority: Signer<'info>,
 }
 
@@ -483,17 +195,17 @@ pub struct CreateAppointment<'info> {
         ],
         bump
     )]
-    pub appointment: Account<'info, Appointment>,
+    pub appointment: Box<Account<'info, Appointment>>,
     #[account(
         seeds = [b"patient", patient_authority.key().as_ref()],
         bump = patient.bump
     )]
-    pub patient: Account<'info, Patient>,
+    pub patient: Box<Account<'info, Patient>>,
     #[account(
         seeds = [b"doctor", doctor.authority.as_ref()],
         bump = doctor.bump
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     #[account(mut)]
     pub patient_authority: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -511,9 +223,9 @@ pub struct UpdateAppointment<'info> {
         ],
         bump = appointment.bump
     )]
-    pub appointment: Account<'info, Appointment>,
+    pub appointment: Box<Account<'info, Appointment>>,
     #[account(mut)]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     pub authority: Signer<'info>,
 }
 
@@ -531,15 +243,15 @@ pub struct CreateMedicalRecord<'info> {
         ],
         bump
     )]
-    pub medical_record: Account<'info, MedicalRecord>,
-    pub patient: Account<'info, Patient>,
+    pub medical_record: Box<Account<'info, MedicalRecord>>,
+    pub patient: Box<Account<'info, Patient>>,
     #[account(mut)]
     pub authority: Signer<'info>,
     #[account(
         seeds = [b"doctor", authority.key().as_ref()],
         bump = doctor.bump
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -558,19 +270,19 @@ pub struct StoreEncryptedMedicalData<'info> {
         ],
         bump = medical_record.bump
     )]
-    pub medical_record: Account<'info, MedicalRecord>,
+    pub medical_record: Box<Account<'info, MedicalRecord>>,
     #[account(
         seeds = [b"patient", patient.authority.as_ref()],
         bump = patient.bump,
         constraint = medical_record.patient == patient.key()
     )]
-    pub patient: Account<'info, Patient>,
+    pub patient: Box<Account<'info, Patient>>,
     #[account(
         seeds = [b"doctor", doctor.authority.as_ref()],
         bump = doctor.bump,
         constraint = medical_record.doctor == doctor.key()
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -609,7 +321,7 @@ pub struct AddTogetherCallback<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(mut)]
-    pub medical_record: Account<'info, MedicalRecord>,
+    pub medical_record: Box<Account<'info, MedicalRecord>>,
     pub arcium_program: Program<'info, Arcium>,
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ADD_TOGETHER))]
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
@@ -632,19 +344,19 @@ pub struct RetrieveMedicalData<'info> {
         ],
         bump = medical_record.bump
     )]
-    pub medical_record: Account<'info, MedicalRecord>,
+    pub medical_record: Box<Account<'info, MedicalRecord>>,
     #[account(
         seeds = [b"patient", patient.authority.as_ref()],
         bump = patient.bump,
         constraint = medical_record.patient == patient.key()
     )]
-    pub patient: Account<'info, Patient>,
+    pub patient: Box<Account<'info, Patient>>,
     #[account(
         seeds = [b"doctor", doctor.authority.as_ref()],
         bump = doctor.bump,
         constraint = medical_record.doctor == doctor.key()
     )]
-    pub doctor: Account<'info, Doctor>,
+    pub doctor: Box<Account<'info, Doctor>>,
     #[account(
         init_if_needed,
         space = 9,
@@ -707,73 +419,6 @@ pub struct InitDecryptMedicalRecordCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ==================== Events ====================
+// events moved to events.rs
 
-#[event]
-pub struct PatientRegisteredEvent {
-    pub patient: Pubkey,
-    pub authority: Pubkey,
-    pub name: String,
-}
-
-#[event]
-pub struct DoctorRegisteredEvent {
-    pub doctor: Pubkey,
-    pub authority: Pubkey,
-    pub name: String,
-    pub specialization: String,
-}
-
-#[event]
-pub struct DoctorVerifiedEvent {
-    pub doctor: Pubkey,
-}
-
-#[event]
-pub struct AppointmentCreatedEvent {
-    pub appointment: Pubkey,
-    pub patient: Pubkey,
-    pub doctor: Pubkey,
-    pub appointment_time: i64,
-}
-
-#[event]
-pub struct AppointmentCompletedEvent {
-    pub appointment: Pubkey,
-}
-
-#[event]
-pub struct AppointmentCancelledEvent {
-    pub appointment: Pubkey,
-}
-
-#[event]
-pub struct MedicalRecordStoredEvent {
-    pub medical_record: Pubkey,
-    pub patient: Pubkey,
-    pub doctor: Pubkey,
-}
-
-#[event]
-pub struct MedicalRecordRetrievedEvent {
-    pub medical_record: Pubkey,
-    pub decrypted_data: [u8; 32],
-}
-
-// ==================== Errors ====================
-
-#[error_code]
-pub enum ErrorCode {
-    #[msg("The computation was aborted")]
-    AbortedComputation,
-    #[msg("Invalid appointment status")]
-    InvalidAppointmentStatus,
-    #[msg("Unauthorized access")]
-    UnauthorizedAccess,
-    #[msg("Doctor not verified")]
-    DoctorNotVerified,
-    #[msg("Arithmetic overflow occurred")]
-    ArithmeticOverflow,
-    #[msg("Cluster not set")]
-    ClusterNotSet,
-}
+// errors moved to errors.rs
