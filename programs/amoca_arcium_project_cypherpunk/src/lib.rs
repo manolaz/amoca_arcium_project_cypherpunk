@@ -119,6 +119,8 @@ pub mod amoca_arcium_project_cypherpunk {
         appointment_time: i64,
         notes: String,
     ) -> Result<()> {
+        // Ensure only verified doctors can accept appointments
+        require!(ctx.accounts.doctor.is_verified, ErrorCode::DoctorNotVerified);
         let appointment = &mut ctx.accounts.appointment;
         appointment.patient = ctx.accounts.patient.key();
         appointment.doctor = ctx.accounts.doctor.key();
@@ -140,6 +142,12 @@ pub mod amoca_arcium_project_cypherpunk {
 
     pub fn complete_appointment(ctx: Context<UpdateAppointment>) -> Result<()> {
         let appointment = &mut ctx.accounts.appointment;
+        // Only the doctor who owns this appointment may complete it
+        require_keys_eq!(
+            ctx.accounts.authority.key(),
+            ctx.accounts.doctor.authority,
+            ErrorCode::UnauthorizedAccess
+        );
         require!(
             appointment.status == AppointmentStatus::Scheduled,
             ErrorCode::InvalidAppointmentStatus
@@ -162,6 +170,12 @@ pub mod amoca_arcium_project_cypherpunk {
 
     pub fn cancel_appointment(ctx: Context<UpdateAppointment>) -> Result<()> {
         let appointment = &mut ctx.accounts.appointment;
+        // Only the doctor who owns this appointment may cancel it (patient flow can be added)
+        require_keys_eq!(
+            ctx.accounts.authority.key(),
+            ctx.accounts.doctor.authority,
+            ErrorCode::UnauthorizedAccess
+        );
         require!(
             appointment.status == AppointmentStatus::Scheduled,
             ErrorCode::InvalidAppointmentStatus
@@ -198,6 +212,8 @@ pub mod amoca_arcium_project_cypherpunk {
         record_type: String,
         timestamp: i64,
     ) -> Result<()> {
+        // Ensure only verified doctors can create medical records
+        require!(ctx.accounts.doctor.is_verified, ErrorCode::DoctorNotVerified);
         let medical_record = &mut ctx.accounts.medical_record;
         medical_record.patient = ctx.accounts.patient.key();
         medical_record.doctor = ctx.accounts.doctor.key();
@@ -219,6 +235,12 @@ pub mod amoca_arcium_project_cypherpunk {
         nonce: u128,
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        // Access control: only the patient or the doctor may write encrypted data
+        let payer_key = ctx.accounts.payer.key();
+        require!(
+            payer_key == ctx.accounts.patient.authority || payer_key == ctx.accounts.doctor.authority,
+            ErrorCode::UnauthorizedAccess
+        );
         
         // Convert data to fixed-size array (ciphertext)
         let mut ciphertext = [0u8; 32];
@@ -271,6 +293,12 @@ pub mod amoca_arcium_project_cypherpunk {
         pub_key: [u8; 32],
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
+        // Access control: only the patient or the doctor may request decryption
+        let payer_key = ctx.accounts.payer.key();
+        require!(
+            payer_key == ctx.accounts.patient.authority || payer_key == ctx.accounts.doctor.authority,
+            ErrorCode::UnauthorizedAccess
+        );
         
         let medical_record = &ctx.accounts.medical_record;
         let nonce_u128 = u128::from_le_bytes(medical_record.encrypted_nonce);
@@ -526,6 +554,18 @@ pub struct StoreEncryptedMedicalData<'info> {
     )]
     pub medical_record: Account<'info, MedicalRecord>,
     #[account(
+        seeds = [b"patient", patient.authority.as_ref()],
+        bump = patient.bump,
+        constraint = medical_record.patient == patient.key()
+    )]
+    pub patient: Account<'info, Patient>,
+    #[account(
+        seeds = [b"doctor", doctor.authority.as_ref()],
+        bump = doctor.bump,
+        constraint = medical_record.doctor == doctor.key()
+    )]
+    pub doctor: Account<'info, Doctor>,
+    #[account(
         init_if_needed,
         space = 9,
         payer = payer,
@@ -585,6 +625,18 @@ pub struct RetrieveMedicalData<'info> {
         bump = medical_record.bump
     )]
     pub medical_record: Account<'info, MedicalRecord>,
+    #[account(
+        seeds = [b"patient", patient.authority.as_ref()],
+        bump = patient.bump,
+        constraint = medical_record.patient == patient.key()
+    )]
+    pub patient: Account<'info, Patient>,
+    #[account(
+        seeds = [b"doctor", doctor.authority.as_ref()],
+        bump = doctor.bump,
+        constraint = medical_record.doctor == doctor.key()
+    )]
+    pub doctor: Account<'info, Doctor>,
     #[account(
         init_if_needed,
         space = 9,
