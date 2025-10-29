@@ -1,5 +1,9 @@
 use anchor_lang::prelude::*;
+use anchor_lang::Discriminator;
 use arcium_anchor::prelude::*;
+
+// Alias required by arcium macros to reference the crate root
+pub use crate as __client_accounts_crate;
 
 const COMP_DEF_OFFSET_ADD_TOGETHER: u32 = comp_def_offset("add_together");
 
@@ -263,7 +267,7 @@ pub mod amoca_arcium_project_cypherpunk {
             computation_offset,
             args,
             None,
-            vec![AddTogetherCallbackAccounts::callback_ix(&[])],
+            vec![AddTogetherCallback::callback_ix(&[])],
         )?;
 
         Ok(())
@@ -271,7 +275,7 @@ pub mod amoca_arcium_project_cypherpunk {
 
     #[arcium_callback(encrypted_ix = "add_together")]
     pub fn add_together_callback(
-        ctx: Context<AddTogetherCallbackAccounts>,
+        ctx: Context<AddTogetherCallback>,
         output: ComputationOutputs<AddTogetherOutput>,
     ) -> Result<()> {
         let o = match output {
@@ -333,7 +337,7 @@ pub mod amoca_arcium_project_cypherpunk {
             computation_offset,
             args,
             None,
-            vec![AddTogetherCallbackAccounts::callback_ix(&[])],
+            vec![AddTogetherCallback::callback_ix(&[])],
         )?;
 
         Ok(())
@@ -601,7 +605,9 @@ pub struct StoreEncryptedMedicalData<'info> {
 
 #[callback_accounts("add_together")]
 #[derive(Accounts)]
-pub struct AddTogetherCallbackAccounts<'info> {
+pub struct AddTogetherCallback<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
     #[account(mut)]
     pub medical_record: Account<'info, MedicalRecord>,
     pub arcium_program: Program<'info, Arcium>,
@@ -768,4 +774,6 @@ pub enum ErrorCode {
     DoctorNotVerified,
     #[msg("Arithmetic overflow occurred")]
     ArithmeticOverflow,
+    #[msg("Cluster not set")]
+    ClusterNotSet,
 }
