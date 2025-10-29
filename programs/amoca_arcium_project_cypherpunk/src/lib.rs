@@ -100,7 +100,9 @@ pub mod amoca_arcium_project_cypherpunk {
     pub fn add_together_callback(
         ctx: Context<AddTogetherCallback>,
         output: ComputationOutputs<AddTogetherOutput>,
-    ) -> Result<()> { instructions::add_together_callback(ctx, output) }
+    ) -> Result<()> {
+        instructions::add_together_callback(ctx, output)
+    }
 
     pub fn retrieve_medical_data(
         ctx: Context<RetrieveMedicalData>,

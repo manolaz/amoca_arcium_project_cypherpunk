@@ -5,7 +5,8 @@ use crate::errors::ErrorCode;
 use crate::state::*;
 
 // arcium helpers referenced from lib.rs macro context
-use crate::{AddTogetherCallback, COMP_DEF_OFFSET_ADD_TOGETHER};
+use crate::AddTogetherCallback;
+use crate::AddTogetherOutput;
 
 #[inline(never)]
 pub fn register_patient(ctx: Context<crate::RegisterPatient>, name: String, date_of_birth: i64, contact_info: String) -> Result<()> {
